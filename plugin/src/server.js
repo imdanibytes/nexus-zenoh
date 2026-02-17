@@ -1,14 +1,13 @@
-const http = require("http");
-const fs = require("fs");
-const path = require("path");
+import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { NexusServer } from "@imdanibytes/nexus-sdk/server";
 
 const PORT = 80;
-const NEXUS_PLUGIN_SECRET = process.env.NEXUS_PLUGIN_SECRET || "";
-const NEXUS_API_URL =
-  process.env.NEXUS_API_URL || "http://host.docker.internal:9600";
-const NEXUS_HOST_URL =
-  process.env.NEXUS_HOST_URL || "http://host.docker.internal:9600";
+const nexus = new NexusServer();
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 
 const MIME_TYPES = {
@@ -18,54 +17,10 @@ const MIME_TYPES = {
   ".json": "application/json",
 };
 
-// ── Token Management ───────────────────────────────────────────
-
-let cachedAccessToken = null;
-let tokenExpiresAt = 0;
-
-async function getAccessToken() {
-  if (cachedAccessToken && Date.now() < tokenExpiresAt - 30000) {
-    return cachedAccessToken;
-  }
-
-  const res = await fetch(`${NEXUS_HOST_URL}/api/v1/auth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ secret: NEXUS_PLUGIN_SECRET }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Token exchange failed: ${res.status}`);
-  }
-
-  const data = await res.json();
-  cachedAccessToken = data.access_token;
-  tokenExpiresAt = Date.now() + data.expires_in * 1000;
-  return cachedAccessToken;
-}
-
 // ── Extension Helpers ──────────────────────────────────────────
 
 async function callExtension(operation, input = {}) {
-  const token = await getAccessToken();
-  const res = await fetch(
-    `${NEXUS_HOST_URL}/api/v1/extensions/zenoh/${operation}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ input }),
-    }
-  );
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Extension call ${operation} failed (${res.status}): ${text}`);
-  }
-
-  return res.json();
+  return nexus.callExtension("zenoh", operation, input);
 }
 
 function sleep(ms) {
@@ -189,13 +144,14 @@ const server = http.createServer((req, res) => {
 
   // Config endpoint — short-lived access token for the frontend
   if (req.url === "/api/config") {
-    getAccessToken()
-      .then((token) => {
+    nexus
+      .getAccessToken()
+      .then(() => {
         res.writeHead(200, {
           "Content-Type": "application/json",
           "Access-Control-Allow-Origin": "*",
         });
-        res.end(JSON.stringify({ token, apiUrl: NEXUS_API_URL }));
+        res.end(JSON.stringify(nexus.getClientConfig()));
       })
       .catch((err) => {
         res.writeHead(500, { "Content-Type": "application/json" });
@@ -246,7 +202,7 @@ const server = http.createServer((req, res) => {
   if (req.url === "/" || req.url === "/index.html") {
     const html = fs
       .readFileSync(path.join(publicDir, "index.html"), "utf8")
-      .replace(/\{\{NEXUS_API_URL\}\}/g, NEXUS_API_URL);
+      .replace(/\{\{NEXUS_API_URL\}\}/g, nexus.apiUrl);
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(html);
     return;
